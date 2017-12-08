@@ -1,0 +1,581 @@
+---
+title: "TaoTalk"
+author: "Roy Mendelssohn"
+date: "10/18/2017"
+output: html_notebook
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r initial, warning = FALSE, message = FALSE, echo = FALSE}
+library("dygraphs")
+library("dplyr")
+library("ggfortify")
+library("ggplot2")
+library("KFAS")
+library("lubridate")
+library("magrittr")
+library("rerddap")
+library("shiny")
+library("xts")
+```
+
+## Intro
+
+This notebook is looking at the case for a "cool blob" in the tropics during the last several months,  as well as the case for a "La Nina" at present.  This is done by estimating state-space decompositons to the Tao Array (subsurface) temperture in part of the region.  As much as possible things are done such that this Notebook is self-contained,  and the entire presentation reproducible. This is aided by retrieving the data from ERD's ERDDAP server, so that the data extraction can be replicated.
+
+Why bother? As Karl Pearson said in 1900:
+
+> "In an age like our own, which is essentially an age of scientific inquiry, the prevalence of doubt and criticism ought not to be regarded with despair or as a sign of decadence. It is one of the safeguards of progress; la critique est la vie de la science, I must again repeat. One of the most fatal (and not so impossible) futures for science would be the institution of a scientific hierarchy which would brand as heretical all doubt as to its conclusions, all criticism of its results."
+
+<br />
+
+## Study Area and Retrieval of Data  
+
+<br />
+
+Let's use ERDDAP to see where there are TAO arrays in the area of interest:  
+
+<br />
+
+
+```{r getLocationsPng, eval=FALSE}
+graphURL <- "http://coastwatch.pfeg.noaa.gov/erddap/tabledap/pmelTaoMonT.largePng?longitude,latitude,wmo_platform_code&time%3E=1977-11-16T00%3A00%3A00Z&depth%3C=500&latitude%3E=-62.1&latitude%3C=56.9&longitude%3E=162.6&longitude%3C=281.6&.draw=markers&.marker=5%7C5&.color=0x000000&.colorBar=%7C%7C%7C%7C%7C&.bgColor=0xffccccff"
+download.file(graphURL, "Tao.png")
+```
+
+<br />
+
+![](Tao.png)
+
+ <br />
+ 
+
+ 
+ We can use ERDDAP to download the data, and then read it into R.  
+ 
+<br />
+ 
+```{r getTaoData, eval = FALSE}
+taoDataURL <- "http://coastwatch.pfeg.noaa.gov/erddap/tabledap/pmelTaoMonT.csvp?station%2Clongitude%2Clatitude%2Ctime%2Cdepth%2CT_20&longitude%3E=130&longitude%3C=240&latitude%3E=-20&latitude%3C=20&time%3E=1977-11-16T12%3A00%3A00Z&time%3C=2017-10-16T12%3A00%3A00Z&depth%3C=500"
+
+tao_data <- read.csv(taoDataURL, stringsAsFactors = FALSE)
+# changes the column names to remove the units
+names(tao_data) <- c("station", "longitude", "latitude", "time", "depth", "T_20")
+# get the distinct lat-lon locations of the data
+locations <- distinct(tao_data, latitude, longitude)
+#get the unique stations
+stations <- distinct(tao_data, station)
+# set time to R time
+temp1 <- ymd_hms(tao_data$time)
+tao_data$time <- temp1
+
+```
+
+<br />
+
+
+## State-Space Decomposition Brush-up  
+
+
+State-space decompositions aim to decompose a time series into a\n sum of different components:  
+
+- non-parametric "trend" term,  
+- "seasonal" term with changing phase and amplitude
+- a damped, stationary "cyclic" term with changing phase and amplitude
+
+One way to view how this works, is given an initial estimate for each component (say the mean for the trend, the "monthly mean" for the seasonal etc) remove from the data the other components, and then estimate a "smooth" of the resulting partial residual series.  Do this for each component,  and repeat until convergence (this essentially the backfitting algorithm of GAMs.)  
+
+Each "smooth" of a partial residual has a smoothing parameter, that at one extreme is the deterministic counterpart of that component,  and at the other extreme interpolates the partial residual.  
+
+To see this in action,  lets get data from the Hadley monthly SST dataset, and do a decomposition, and use that.  First some helper functions that will be used here and later on.  These functions are used in the package `KFAS` to update the model as parameters are estimated iteratively.  The function `update_modeltsc()` is for a model with a level, seasonal and cycle,  and the function `update_modelsc()` for a model with a constant mean, a seasonal and a cycle.  
+
+<br />
+
+```{r updateFNs}
+update_modeltsc <- function(pars, model) {
+   model$H[1,1,1] <- exp(2. * pars[1])
+   freq <- (2.*pi)/(2. + exp(pars[5]))
+   mycycle <- SSMcycle(period = (1./freq), Q = matrix(NA))
+   damp <- abs(pars[6])/sqrt(1 + pars[6]**2)
+   temp1 <- 1 - damp**2
+   temp2 <- exp(2 * pars[4])
+   var_cycle <- temp2 * temp1
+   diag(model$Q[,,1]) <- c(exp(2*pars[2]), exp(2*pars[3]), rep(var_cycle,2))
+   model$T[13:14, 13:14, 1] <- damp*mycycle$T
+  return(model)
+}
+  update_modelsc <- function(pars, model) {
+  require(KFAS)
+  model$H[1,1,1] <- exp(2. * pars[1])
+  freq <- (2.*pi)/(2. + exp(pars[4]))
+  mycycle1 <- SSMcycle(period = (1./freq), Q = matrix(NA))
+  damp <- abs(pars[5])/sqrt(1 + pars[5]**2)
+  temp1 <- 1 - damp**2
+  temp2 <- exp(2 * pars[3])
+  var_cycle <- temp2 * temp1
+  diag(model$Q[,,1]) <- c(exp(2*pars[2]), rep(var_cycle,2))
+  model$T[13:14, 13:14, 1] <- damp*mycycle1$T
+  return(model)
+  }
+
+```
+
+<br />
+
+The R package `rerddap` is used to get the data at (39.5, -139.5) from the ERDDAP server.  
+
+<br />
+
+```{r hadleyData, warnng = FALSE, message = FALSE}
+require("rerddap")
+require("xts")
+#get the data from ERDDAP
+hadleyInfo <- info("erdHadISST")
+sstData <- griddap(hadleyInfo, latitude = c(36.5, 36.5), longitude = c(-130.5, -130.5), time = c("1872-01-16", "2017-08-16"))
+# extract the needed series, and put into an xts structure for later use
+sst <- sstData$data$sst
+sstTime <- sstData$data$time
+sstTime <- as.Date(sstTime, origin = '1970-01-01', tz = "GMT")
+
+```
+
+<br />
+
+Lets look at the data: 
+
+<br />
+
+
+```{r hadleyPlot, warning = FALSE, message = FALSE}
+require("ggfortify")
+autoplot(xts(sst, order.by = sstTime, size = .1))
+```
+
+<br />
+
+and perform a state-space decomposition: 
+
+<br />
+
+```{r hadleySSM, warning = FALSE, message = FALSE}
+irreg_init <- 0.5 * log(1)
+level_init <-  0.5 * log(.1)
+season_init <-  0.5 * log(.1)
+cycle_init <-  0.5 * log(1.8)
+freq1Init <- 8
+dampInit <- 2
+damp <- abs(dampInit)/sqrt(1 + dampInit**2)
+cycle1_init <- cycle_init/sqrt(1 - damp**2)
+freq <- (2.*pi)/(2. + exp(freq1Init))
+modeltsc_inits <- c(irreg_init, level_init, season_init, cycle1_init, freq1Init, dampInit)
+model_hadley <- SSModel(sst ~ SSMtrend(degree = 1 , Q = list(NA)) +  
+                             SSMseasonal(period = 12, Q = NA, sea.type = "dummy") +
+                             SSMcycle(period = (1/freq), Q = matrix(NA)),
+                           H = matrix(NA))
+model_hadley$P1inf[13, 13] <- 0
+model_hadley$P1inf[14, 14] <- 0
+model_hadley$P1[13, 13] <- 10
+model_hadley$P1[14, 14] <- 10
+model_hadley$T[13:14, 13:14,1] <- damp * model_hadley$T[13:14,13:14,1]
+model_hadley_Fit <- fitSSM(model = model_hadley, inits = modeltsc_inits, updatefn = update_modeltsc)
+smooth_hadley <- KFS(model_hadley_Fit$model, filtering = "state", smoothing = "state")
+sst_level <-  signal(smooth_hadley, states = 'level')$signal
+sst_season <- signal(smooth_hadley, states = 'season')$signal 
+sst_cycle <- signal(smooth_hadley, states = 'cycle')$signal
+autoplot(xts(sst_level, order.by = sstTime))
+autoplot(xts(sst_season, order.by = sstTime))
+autoplot(xts(sst_cycle, order.by = sstTime))
+
+```
+
+
+<br />
+
+As an aside,  an interesting thing about this decomposition is that the seasonal is deterministic, but the cycle term is at a frequency just off one of the seasonal frequencies.  I rarely find this behavior in purely observation data,  which Hadley SST is not,  which suggests it may be an artifact of the analysis method pulling the data toward climatology.   Probably the seasonal variability is more like the "seasonal + cycle":
+
+<br />
+
+```{r HadleySeasCyc}
+temp_data <- as.numeric(sst_season) + as.numeric(sst_cycle)
+autoplot(xts(temp_data, order.by = sstTime))
+```
+
+<br />
+
+Looking at the trend partial residuals:    
+
+<br />
+
+```{r trendExample, echo = FALSE, warning = FALSE, message = FALSE}
+inputPanel(
+  sliderInput("varTrend", label = "Trend Variance:",
+              min = 0., max = .0001 , value = 0., step = .000001)
+)
+
+renderDygraph({
+  pTrend <- sst - sst_season - sst_cycle
+  modelTrend <- SSModel(pTrend ~ SSMtrend(1, Q = list(input$varTrend)), H = 0.001)
+  smoothTrend <- KFS(modelTrend, smoothing = 'state')
+  trend <- signal(smoothTrend, states = 'level')$signal
+  series_length <- length(trend)
+  out_data <- cbind(as.numeric(pTrend), as.numeric(trend))
+  out_data <- xts(out_data, order.by = sstTime)
+#  component <- temp <- c(rep("partial_resid", times = series_length), rep("trend", times = series_length))
+#  temp_frame <- data.frame("temperature" = out_data, "time" = rep(sstTime, times = 2), "component" = component)
+#  ggplot(temp_frame, aes(x = time, y = temperature, colour = component)) + geom_line() + labs(colour = 'State-space est')
+    dimnames(out_data) <- list("junk", c("partial_residual", "trend"))
+dygraphs::dygraph(out_data) %>% dygraphs::dyGroup(c("partial_residual", "trend"), color = c("red", "green")) %>% dygraphs::dyRangeSelector()})
+
+```
+
+<br />
+
+And the seasonal partial residuals: 
+
+<br />
+
+```{r seasonExample, echo = FALSE, warning = FALSE, message = FALSE}
+inputPanel(
+  sliderInput("varSeason", label = "Season Variance:",
+              min = 0., max = 0.01 , value = 0., step = 0.0001)
+)
+
+renderDygraph({
+  pSeason <- sst - sst_level - sst_cycle
+  modelSeason <- SSModel(pSeason ~ SSMseasonal(period = 12, Q = input$varSeason, sea.type = "dummy"), H = 0.001)
+  smoothSeason <- KFS(modelSeason, smoothing = 'state')
+  season <- signal(smoothSeason, states = 'seasonal')$signal
+  out_data <- cbind(as.numeric(pSeason), as.numeric(season))
+  out_data <- xts(out_data, order.by = sstTime)
+  dimnames(out_data) <- list("junk", c("partial_residual", "seasonal"))
+dygraphs::dygraph(out_data) %>% dygraphs::dyGroup(c("partial_residual", "seasonal"), color = c("red", "green")) %>% dygraphs::dyRangeSelector()
+   })
+
+```
+
+<br />
+
+and the cycle partial residuals:
+
+<br />
+
+```{r cycleExample, echo = FALSE, warning = FALSE, message = FALSE}
+inputPanel(
+  sliderInput("varCycle", label = "Cycle Variance:",
+              min = 0., max = 0.1 , value = 0., step = 0.002)
+)
+
+renderDygraph({
+  aCycle <- sst - sst_level - sst_season
+  freq <- 2.441454
+  damp <- .9
+  modelCycle <- SSModel(aCycle ~ SSMcycle(period = (1/freq), Q = matrix(input$varCycle)), H = 0.001)
+  modelCycle$P1inf[2, 2] <- 0
+  modelCycle$P1inf[3, 3] <- 0
+  modelCycle$P1[2, 2] <- 10
+  modelCycle$P1[3, 3] <- 10
+  modelCycle$T[2:3, 2:3, 1] <- damp * modelCycle$T[2:3, 2:3, 1]
+  smoothCycle <- KFS(modelCycle, smoothing = 'state')
+  myCycle <- signal(smoothCycle, states = 'cycle')$signal
+  out_data <- cbind(as.numeric(aCycle), as.numeric(myCycle))
+  out_data <- xts(out_data, order.by = sstTime)
+  dimnames(out_data) <- list("junk", c("partial_residual", "cycle"))
+dygraphs::dygraph(out_data) %>% dygraphs::dyGroup(c("partial_residual", "cycle"), color = c("red", "green")) %>% dygraphs::dyRangeSelector()
+  })
+```
+
+
+<br />
+
+## Analyzing the TAO array data  
+
+<br />
+
+It takes too long to run the code to do all of the analysis,  so for this talk the results have been saved and read back in,  but the following code chunk will reproduce the results:  
+
+<br />
+
+```{r, eval = FALSE}
+irreg_init <- 0.5 * log(1)
+level_init <-  0.5 * log(.1)
+season_init <-  0.5 * log(.1)
+cycle_init <-  0.5 * log(1.8)
+freq1Init <- 8
+dampInit <- 2
+damp <- abs(dampInit)/sqrt(1 + dampInit**2)
+cycle1_init <- cycle_init/sqrt(1 - damp**2)
+freq <- (2.*pi)/(2. + exp(freq1Init))
+modeltsc_inits <- c(irreg_init, level_init, season_init, cycle1_init, freq1Init, dampInit)
+modelsc_inits <-  c(irreg_init, season_init, cycle1_init, freq1Init, dampInit)
+tao_results = list()
+for (station_num in 1:74) {
+  print(paste("station_num", station_num))
+  present_station <- stations$station[station_num]
+  station_data <- filter(tao_data, station == present_station)
+  station_depths <- unique(station_data$depth)
+  no_depths <- length(station_depths)
+  no_times <- length(unique(station_data$time))
+  #
+  #  calculate models with trend
+  #
+  levels <- array(NA_real_, dim = c(no_depths, no_times))
+  seasons <- array(NA_real_, dim = c(no_depths, no_times))
+  cycles <- array(NA_real_, dim = c(no_depths, no_times))
+  AIC <- array(NA_real_, dim = no_depths)
+  BIC <- array(NA_real_, dim = no_depths)
+  AICc <- array(NA_real_, dim = no_depths)
+  for (idepth in 1:no_depths) {
+    print(paste("depth", idepth))
+    temp_frame  <- filter(station_data, depth == station_depths[idepth])
+    seriesData <- temp_frame$T_20
+    seriesTime <- temp_frame$time
+    series_length <- length(seriesData)
+    first_good <- min(which(!is.na(seriesData)))
+    seriesData <- seriesData[first_good:series_length]
+    nobs <- length(na.omit(seriesData))
+    print(paste("nobs", nobs))
+    npar <- 6 
+    if (nobs > 200) {
+      print('calculating model')
+      model_t20 <- SSModel(seriesData ~ SSMtrend(degree = 1 , Q = list(NA)) +  
+                             SSMseasonal(12, Q=NA, sea.type = "dummy") +
+                             SSMcycle(period = (1/freq), Q = matrix(NA)),
+                           H = matrix(NA))
+      model_t20$P1inf[13, 13] <- 0
+      model_t20$P1inf[14, 14] <- 0
+      model_t20$P1[13, 13] <- 10
+      model_t20$P1[14, 14] <- 10
+      model_t20$T[13:14, 13:14,1] <- damp * model_t20$T[13:14,13:14,1]
+      model_t20_Fit <- fitSSM(model = model_t20, inits = modeltsc_inits, updatefn = update_modeltsc)
+      smooth_t20 <- KFS(model_t20_Fit$model, filtering = "state", smoothing = "state")
+      level <-  signal(smooth_t20, states = 'level')$signal
+      season <- signal(smooth_t20, states = 'season')$signal 
+      cycle <- signal(smooth_t20, states = 'cycle')$signal
+      levels[idepth, first_good:series_length] <- drop(level)
+      seasons[idepth, first_good:series_length] <- drop(season)
+      cycles[idepth, first_good:series_length] <- drop(cycle)
+      ll <- logLik(model_t20_Fit$model)
+      print(paste("ll", ll))
+      AIC[idepth] <- (-2 * ll) + (2 * npar)
+      BIC[idepth] <- (-2 * ll) + log(nobs) * npar
+      AICc[idepth] <- AIC[idepth] + 2 * npar * (npar + 1) / (nobs - npar - 1)  
+    }
+  }
+  #
+  #  calculate models with fixed mean
+  #
+  levels1 <- array(NA_real_, dim = c(no_depths, no_times))
+  seasons1 <- array(NA_real_, dim = c(no_depths, no_times))
+  cycles1 <- array(NA_real_, dim = c(no_depths, no_times))
+  AIC1 <- array(NA_real_, dim = no_depths)
+  BIC1 <- array(NA_real_, dim = no_depths)
+  AICc1 <- array(NA_real_, dim = no_depths)
+  for (idepth in 1:no_depths) {
+    print(paste("depth", idepth))
+    temp_frame  <- filter(station_data, depth == station_depths[idepth])
+    seriesData <- temp_frame$T_20
+    series_length <- length(seriesData)
+    first_good <- min(which(!is.na(seriesData)))
+    seriesData <- seriesData[first_good:series_length]
+    nobs <- length(na.omit(seriesData))
+    print(paste("nobs", nobs))
+    npar <- 5
+    if (nobs > 200) {
+      print('calculating model')
+      model_t20 <- SSModel(seriesData ~ SSMseasonal(12, Q=NA, sea.type = "dummy") + SSMcycle(period = (1/freq), Q = matrix(NA)),
+                           H = matrix(NA))
+      model_t20$P1inf[13, 13] <- 0
+      model_t20$P1inf[14, 14] <- 0
+      model_t20$P1[13, 13] <- 10
+      model_t20$P1[14, 14] <- 10
+      model_t20$T[13:14, 13:14,1] <- damp * model_t20$T[13:14,13:14,1]
+      model_t20_Fit <- fitSSM(model = model_t20, inits = modelsc_inits, updatefn = update_modelsc)
+      smooth_t20 <- KFS(model_t20_Fit$model, filtering = "state", smoothing = "state")
+      level <-  smooth_t20$alphahat[, 1]
+      season <- signal(smooth_t20, states = 'season')$signal 
+      cycle <- signal(smooth_t20, states = 'cycle')$signal
+      levels1[idepth, first_good:series_length] <- drop(level)
+      seasons1[idepth, first_good:series_length] <- drop(season)
+      cycles1[idepth, first_good:series_length ] <- drop(cycle)
+      ll <- logLik(model_t20_Fit$model)
+      AIC1[idepth] <- (-2 * ll) + (2 * npar)
+      BIC1[idepth] <- (-2 * ll) + log(nobs) * npar
+      AICc1[idepth] <- AIC1[idepth] + 2 * npar * (npar + 1) / (nobs - npar - 1)  
+    }
+  }
+  ssm_output <- list(time = seriesTime, depths = station_depths,  levels = levels, seasons = seasons, cycles = cycles, AIC = AIC, BIC = BIC, AICc = AICc, levels1 = levels1, seasons1 = seasons1, cycles1 = cycles1, AIC1 = AIC1, BIC1 = BIC1, AICc1 = AICc1)
+  tao_results[[present_station]] <- ssm_output
+  
+}
+
+```
+
+<br />
+
+Note that two models have been fit,  one with varying level and one with a fixed level, and model comparison statistics calculated for each.
+
+<br />
+
+### Plotting the TAO array decompostions  
+
+<br />
+
+The code below will put up a Shiny application with dygraph being used to allow the selection of the location to be displayed,  and the component to be graphed for either model at all available depths.  Note that if there were fewer than 200 actual data points,  a particular depth is not shown.  If no depth has enough data points,  nothing is shown. 
+
+
+```{r taoResults, echo = FALSE, warning = FALSE, message = FALSE}
+library(shiny)
+library(magrittr)
+load("/Users/rmendels/Documents/Years/FY18/Analysis/TAO/tao_results.RData")
+locations <- names(tao_results)
+
+shinyApp(
+
+   ui = fluidPage(
+   
+       selectInput("location", label = "Choose location:",
+                    choices = locations, selected = locations[1]),
+        
+      radioButtons("component", label = h3("Series Component:"),
+                   choices = list("Raw" = "raw", "Trend" = "levels", "Seasonal " = "seasons", "Cycle" = "cycles", "Trend1" = "levels1", "Seasonal1" = "seasons1", "Cycle1" = "cycles1"), 
+                   selected = "cycles"),
+htmlOutput("dygraph")
+         
+),
+
+server = function(input, output) {
+      library(magrittr)
+      library(dygraphs)
+      output$dygraph <- renderUI({
+      location <- input$location
+      location_data <- tao_results[[location]]
+      str(location_data)
+      component <- input$component
+      tmp <- location_data[[component]]
+      str(tmp)
+      myTime <- location_data$time
+      newdepths <- location_data$depths
+      tmp_dims <- dim(tmp)
+      str(tmp_dims)
+      myPlots <- list()
+      counter <- 0
+      for (i in 1:tmp_dims[1]) {
+        if (length(na.omit(tmp[i,])) > 200) {
+          temperature <- tmp[i, ]
+          if (component == 'levels') {
+            temp_max <- max(temperature, na.rm = TRUE)
+            temp_min <- min(temperature, na.rm = TRUE)
+            if (abs(temp_max - temp_min) < 0.01) {
+              temperature <- array(temp_max, dim = length(temperature))
+            }
+          }
+          temperature <- xts::xts(temperature, order.by = myTime)
+          counter <- counter + 1
+          title <- paste("Location", location, "Depth", newdepths[i])
+          mylist <- list(temperature, main = title, group = "depths")
+          myPlots[[counter]] <- dygraphs::dygraph(temperature, main = title, group = "depths") %>% dygraphs::dyRangeSelector()
+        }
+      }
+      myPlots <- htmltools::tagList(myPlots) 
+      myPlots
+    })
+},
+      options = list(height = 4000)
+)
+```
+
+
+<br />
+
+## Darwin Pressure  
+
+<br />
+
+The "SOI", defined in some sense as the difference between Pmsl at Tahiti and Darwin, is often taken as a predictor of ENSO.  Unfortunately,  as has been shown in a GRL paper,  the dynamics of the two series are quite different,  and when you take the difference you wind up with a series that likely does not have the properties you think it does.  The GRL papaer shows that a proper analysis of Pmsl at Darwin alone will do just as well.  So let's examine the Darwin pressures.  
+
+This series is not available on ERDDAP,  but it can be downloaded from:  
+
+https://iridl.ldeo.columbia.edu/SOURCES/.Indices/.Darwin/data.nc
+
+The resulting netcdf file is renamed as "darwin.nc", read into R:  
+
+```{r darwinData, echo = FALSE, warning = FALSE, message = FALSE}
+require("ncdf4")
+# the code will below will download the darwin data
+# file saved so know the last time period
+# if you use this,  you may have to change the "darwinTime" definition
+#
+# darwinURL <- 'https://iridl.ldeo.columbia.edu/SOURCES/.Indices/.Darwin/data.nc'
+# download.file(darwinURL, 'darwin.nc', mode = 'wb')
+#
+darwinFile <- nc_open('/Users/rmendels/Documents/Years/FY18/Analysis/TAO/darwin.nc')
+pressure <- ncvar_get(darwinFile, 'full')
+nc_close(darwinFile)
+darwinTime <- seq(ISOdate(1882,1,1), ISOdate(2017,9,1), "months")
+darwinPressure <- xts(pressure, order.by = darwinTime)
+```
+
+<br />
+
+A state-space decompostion is performed on the pressure series: 
+
+<br />
+
+
+```{r darwinSSM, warning = FALSE,  message = FALSE}
+irreg_init <- 0.5 * log(1)
+level_init <-  0.5 * log(.1)
+season_init <-  0.5 * log(.1)
+cycle_init <-  0.5 * log(1.8)
+freq1Init <- 8
+dampInit <- 2
+damp <- abs(dampInit)/sqrt(1 + dampInit**2)
+cycle1_init <- cycle_init/sqrt(1 - damp**2)
+freq <- (2.*pi)/(2. + exp(freq1Init))
+modeltsc_inits <- c(irreg_init, level_init, season_init, cycle1_init, freq1Init, dampInit)
+model_darwin <- SSModel(darwinPressure ~ SSMtrend(degree = 1 , Q = list(NA)) +  
+                             SSMseasonal(period = 12, Q = NA, sea.type = "dummy") +
+                             SSMcycle(period = (1/freq), Q = matrix(NA)),
+                           H = matrix(NA))
+model_darwin$P1inf[13, 13] <- 0
+model_darwin$P1inf[14, 14] <- 0
+model_darwin$P1[13, 13] <- 10
+model_darwin$P1[14, 14] <- 10
+model_darwin$T[13:14, 13:14,1] <- damp * model_darwin$T[13:14,13:14,1]
+model_darwin_Fit <- fitSSM(model = model_darwin, inits = modeltsc_inits, updatefn = update_modeltsc)
+smooth_darwin <- KFS(model_darwin_Fit$model, filtering = "state", smoothing = "state")
+darwin_level <-  signal(smooth_darwin, states = 'level')$signal
+darwin_season <- signal(smooth_darwin, states = 'season')$signal 
+darwin_cycle <- signal(smooth_darwin, states = 'cycle')$signal
+
+```
+
+<br />
+
+Plotting the results of the state-space model:
+
+<br />
+
+```{r darwinPlot, echo = FALSE, message = FALSE, warning = FALSE}
+require("dygraphs")
+require("magrittr")
+darwinPlots <- list()
+temp <- xts(as.numeric(darwin_level), order.by = darwinTime)
+darwinPlots[["level"]] <- dygraphs::dygraph(temp, main = "Darwin Trend", group = "pressure") %>% dygraphs::dyRangeSelector()
+temp <- xts(as.numeric(darwin_cycle), order.by = darwinTime)
+darwinPlots[["cycle"]] <- dygraphs::dygraph(temp, main = "Darwin Cycle", group = "pressure") %>% dygraphs::dyRangeSelector()
+temp <- xts(as.numeric(darwin_season), order.by = darwinTime)
+darwinPlots[["season"]] <- dygraphs::dygraph(temp, main = "Darwin Season", group = "pressure") %>% dygraphs::dyRangeSelector()
+htmltools::tagList(darwinPlots)
+```
+
+
+
+
+
+
