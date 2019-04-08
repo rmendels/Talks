@@ -1,0 +1,28 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+# reprotalk
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+The goal of reprotalk is to leave you totally confused.
+
+## Installation
+
+Good luck trying to install this package
+
+## Example
+
+If I give you an example I would have to actually check that anything runs.

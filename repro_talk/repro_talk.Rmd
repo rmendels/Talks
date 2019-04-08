@@ -1,0 +1,263 @@
+---
+title: "Reproducible Research with R - Some Quick Overviews"
+subtitle: "YMMV"
+author: "Roy Mendelssohn"
+institute: "Other Worldly"
+date: "2019/03/25 (updated: `r Sys.Date()`)"
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    css: xaringan-themer.css
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+---
+
+
+```{r xaringan-themer, include = FALSE}
+library(xaringanthemer)
+mono_light(
+  base_color = "#23395b",
+  link_color = "##ffff88"
+)
+
+options(servr.daemon = TRUE)
+
+```
+
+
+# Overview
+
+- packages
+
+--
+
+- style guidelines
+
+--
+
+- RMarkdown (demystified)
+
+--
+
+- functions and documentation
+
+--
+
+- git and github
+
+--
+
+- pkgdown,  bookdown,  pagedown
+
+---
+
+# Let's Make a Musical!
+
+---
+
+# Let's Make a Package!
+
+
+---
+
+# Let's Make a Musical Redux!
+
+--
+
+Over a short time period,  Mickey Rooney and Judy Garland made 10 films together
+
+--
+
+No matter what the situation, solution always "let's make a musical"
+
+--
+
+Musical solved all problems.  Baddies vanquished. Judy finds Mickey.  Mickey finds Judy.
+
+--
+
+[Latest Example of Plotline](https://www.youtube.com/watch?v=qkHmUWFFNDc)
+
+---
+
+# inscrutable question "Why"? (a package?) (a duck?)
+
+--
+ 
+Everything loads on a simple command
+
+--
+
+All functions and data immediately available
+
+--
+
+Everything is documented
+
+--
+
+Essential for sending to collaborator or yourself 3 years from now
+  
+--
+
+See https://swcarpentry.github.io/r-novice-inflammation/08-making-packages-R/
+
+
+---
+# inscrutable question "Why"? (a package?) (a duck?)
+
+Package Reference - http://r-pkgs.had.co.nz
+
+2nd Edition - https://r-pkgs.org
+
+--
+
+[Where we are headed](https://rmendels.github.io/xtractomatic_docs/index.html)
+
+---
+
+# Creating the package (assuming central repository)
+
+--
+
+Create the package, enabling git
+
+--
+
+Use `Github Desktop` to push to Github
+
+--
+
+Else create package, create repository on Github
+Clone Repository
+Copy files over to cloned repository
+
+
+---
+
+# An aside about Git
+
+--
+
+Difference between git and Github or Gitlab or Bitbucket
+
+--
+
+Git reference aimed at R - https://happygitwithr.com
+
+--
+
+Git workflows  (more on this at the end)
+
+- https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow
+
+- https://nvie.com/posts/a-successful-git-branching-model/
+
+---
+
+# Create vignette  (demystifying RMarkdown,  Notebooks, Vignettes)
+
+--
+
+Though can do from GUI,  I prefer command as it creates directory:
+
+```{r create_vignette, echo = TRUE, eval = FALSE}
+
+devtools::use_vignette("my-tracking-package")
+
+```
+
+--
+
+Rmarkdown file, RNotebook, Vignette, Pagedown,  Bookdown
+
+- YAML info at top of file determines what type,  what it can do
+
+--
+
+RMarkdown Cheatsheet  - https://github.com/rstudio/cheatsheets/raw/master/rmarkdown-2.0.pdf
+
+From within IDE - https://rmarkdown.rstudio.com/lesson-15.html
+
+
+---
+# Controlling behavior of code chunks
+
+knitr options - https://yihui.name/knitr/options/
+
+--
+
+good practice to name chunks
+
+
+---
+
+# Coding Guidelines
+
+Stay DRY
+
+--
+
+Think functions,  not scripts
+
+--
+
+follow coding guidelines
+
+--
+
+document functions
+
+--
+
+write tests  (usethis::use_testthat())
+
+--
+
+Package book guidelines - http://r-pkgs.had.co.nz/r.html
+
+tidyverse guidelines - https://style.tidyverse.org
+
+rOpenSci - https://ropensci.github.io/dev_guide/building.html#function-and-argument-naming
+
+---
+# One final check
+
+Install package `goodpractice` and run on your package.
+
+https://github.com/MangoTheCat/goodpractice
+
+--
+
+If in Github,  create a README file
+
+devtools::use_readme_rmd()
+
+---
+# git worklow
+
+https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow
+
+https://nvie.com/posts/a-successful-git-branching-model/
+
+Basic idea is work on branches only,  merge into master
+
+Each branch fairly specific, branch name reflects purpose
+
+After merging, if needed branches can be deleted
+
+Formally define versions
+
+Version number system - https://semver.org,
+
+http://r-pkgs.had.co.nz/description.html#version
+
+http://r-pkgs.had.co.nz/release.html
+
+
+
+
+---
+
